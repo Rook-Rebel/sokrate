@@ -1,0 +1,18 @@
+# Vercel CLI
+.vercel/
+
+# Local tooling
+node_modules/
+*.log
+.env
+.env.*
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Exported pilot/research data can contain participant responses — never commit it.
+*.csv
