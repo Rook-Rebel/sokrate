@@ -1,66 +1,79 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html lang="ka">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
-  <title>Kapanadze AI Socrates — English Research Demonstrator</title>
-  <meta name="description" content="Kapanadze AI Socrates is an English research demonstrator for guided Socratic learning, diagnosis and teaching-method research across four topics: half-derivatives, derivatives without limits, arithmetic progressions and ancient Egyptian pyramids.">
-  <meta name="author" content="Davit Kapanadze">
-  <meta name="theme-color" content="#f3f6fb" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#0e1420" media="(prefers-color-scheme: dark)">
-
-  <meta property="og:type" content="website">
-  <meta property="og:site_name" content="Kapanadze AI Socrates">
-  <meta property="og:title" content="Kapanadze AI Socrates — English Research Demonstrator">
-  <meta property="og:description" content="Guided Socratic learning, diagnosis and teaching-method research across four topics. Runs entirely in the browser.">
-  <meta property="og:locale" content="en_GB">
-  <meta name="twitter:card" content="summary">
-  <meta name="twitter:title" content="Kapanadze AI Socrates — English Research Demonstrator">
-  <meta name="twitter:description" content="Guided Socratic learning, diagnosis and teaching-method research across four topics. Runs entirely in the browser.">
-
-  <link rel="icon" href="favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="css/styles.css">
-  <script src="js/questions.js" defer></script>
-  <script src="js/app.js" defer></script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>კაპანაძე AI–სოკრატე · დიაგნოსტიკური სოკრატული დიალოგი</title>
+<meta name="description" content="კაპანაძე AI–სოკრატე: სოკრატული დიაგნოსტიკური დიალოგი მათემატიკასა და ისტორიაში — წინარე ცოდნა, სამი დონე, ცოდნის სამი კომპონენტი და დასკვნა ლექტორისთვის.">
+<meta name="author" content="დავით კაპანაძე · Davit Kapanadze">
+<meta name="theme-color" content="#f7f6f2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#14171f" media="(prefers-color-scheme: dark)">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Kapanadze AI–Socrates">
+<meta property="og:title" content="კაპანაძე AI–სოკრატე · Kapanadze AI–Socrates">
+<meta property="og:description" content="Socratic diagnostic dialogue in mathematics and history · სოკრატული დიაგნოსტიკური დიალოგი. ქართული | English.">
+<meta property="og:locale" content="ka_GE">
+<meta property="og:locale:alternate" content="en_GB">
+<meta property="og:url" content="https://sokrate-gray.vercel.app/">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+Georgian:wght@400;500;600;700&family=Noto+Serif+Georgian:wght@500;600;700&family=STIX+Two+Text:ital,wght@0,400;0,600;1,400;1,600&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600;8..60,700&display=swap">
+<link rel="stylesheet" href="css/styles.css">
+<script src="js/core/preload.js"></script>
+<script src="js/core/safe-math.js" defer></script>
+<script src="js/core/mathtext.js" defer></script>
+<script src="js/i18n/i18n.js" defer></script>
+<script src="js/data/banks.js" defer></script>
+<script src="js/data/theory.ka.js" defer></script>
+<script src="js/data/topics.js" defer></script>
+<script src="js/i18n/content.js" defer></script>
+<script src="js/i18n/en/ui.js" defer></script>
+<script src="js/i18n/en/q-ap.js" defer></script>
+<script src="js/i18n/en/q-derivative.js" defer></script>
+<script src="js/i18n/en/q-half.js" defer></script>
+<script src="js/i18n/en/q-pyramids.js" defer></script>
+<script src="js/i18n/en/q-gp.js" defer></script>
+<script src="js/i18n/en/q-gpsum.js" defer></script>
+<script src="js/i18n/en/q-apsum.js" defer></script>
+<script src="js/i18n/en/q-equations.js" defer></script>
+<script src="js/i18n/en/q-algebra.js" defer></script>
+<script src="js/i18n/en/theory-derivative.js" defer></script>
+<script src="js/i18n/en/theory-half.js" defer></script>
+<script src="js/i18n/en/topics-math.js" defer></script>
+<script src="js/i18n/en/topics.js" defer></script>
+<script src="js/components/plots.js" defer></script>
+<script src="js/components/start.js" defer></script>
+<script src="js/components/report.js" defer></script>
+<script src="js/app.js" defer></script>
 </head>
 <body>
-  <a class="skip" href="#main">Skip to content</a>
-
-  <header class="site-header">
-    <div class="wrap">
-      <div class="brand">
-        <img class="brand-mark" src="favicon.svg" alt="" width="44" height="44">
-        <div>
-          <h1 class="title">Kapanadze AI Socrates</h1>
-          <p class="sub">English research demonstrator · Four topics · Guided learning, diagnosis and teaching-method research</p>
-        </div>
+<a class="skip" href="#app" id="skipLink">მთავარ შინაარსზე გადასვლა</a>
+<div class="page">
+  <header class="top">
+    <div class="brand">
+      <img class="brand-mark" src="favicon.svg" alt="" width="40" height="40">
+      <div><div class="brand-name" id="brandName">კაპანაძე AI–სოკრატე</div><small id="brandSub">დავით კაპანაძის მეთოდოლოგია · დიაგნოსტიკური სოკრატული დიალოგი</small></div>
+    </div>
+    <div class="top-tools">
+      <div class="lang" id="langSwitch" role="group" aria-label="ენა">
+        <button type="button" data-lang="ka" lang="ka" aria-pressed="true">ქართული</button><span class="sep" aria-hidden="true">|</span><button type="button" data-lang="en" lang="en" aria-pressed="false">English</button>
       </div>
-      <div class="tabs" role="tablist" aria-label="Workspaces">
-        <button type="button" class="tab active" role="tab" id="tab-home" data-view="home" aria-selected="true" aria-controls="app">Student</button>
-        <button type="button" class="tab" role="tab" id="tab-teacher" data-view="teacher" aria-selected="false" aria-controls="app" tabindex="-1">Lecturer</button>
-        <button type="button" class="tab" role="tab" id="tab-research" data-view="research" aria-selected="false" aria-controls="app" tabindex="-1">Researcher</button>
-      </div>
+      <button type="button" class="theme-btn" id="themeBtn" data-mode="auto" aria-label="თემა: ავტომატური" title="თემა: ავტომატური">
+        <svg class="ic ic-auto" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17z"/></svg>
+        <svg class="ic ic-light" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.6M12 18.9v2.6M2.5 12h2.6M18.9 12h2.6M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8"/></svg>
+        <svg class="ic ic-dark" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>
+      </button>
+      <span class="ai-chip" id="aiChip" role="status">AI: მოწმდება…</span>
     </div>
   </header>
-
-  <main id="main" class="wrap" tabindex="-1">
-    <div id="app" role="tabpanel" aria-labelledby="tab-home">
-      <p class="card nojs">JavaScript is required to run this interactive program.</p>
-    </div>
+  <nav class="rail" id="rail" aria-label="პროგრესი"></nav>
+  <main id="app" tabindex="-1">
+    <noscript><p class="card">ამ პროგრამის გასაშვებად საჭიროა JavaScript. · This program requires JavaScript.</p></noscript>
   </main>
-
-  <footer class="site-footer">
-    <div class="wrap">© Davit Kapanadze · Kapanadze AI Socrates · English four-topic demonstrator · Research validity not yet established</div>
-  </footer>
-
-  <dialog id="dialog" aria-labelledby="dialogTitle" aria-describedby="dialogMsg">
-    <h2 id="dialogTitle"></h2>
-    <p id="dialogMsg"></p>
-    <div class="buttons">
-      <button type="button" class="btn soft" id="dialogCancel">Cancel</button>
-      <button type="button" class="btn primary" id="dialogOk">OK</button>
-    </div>
-  </dialog>
+  <footer class="foot"><span id="footerText">© დავით კაპანაძე · კაპანაძე AI–სოკრატე · თემაზე დაფუძნებული დიაგნოსტიკური მოდელი</span> <span class="ver">KA-5.1</span></footer>
+</div>
 </body>
 </html>

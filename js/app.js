@@ -1,511 +1,615 @@
 'use strict';
-/*
- * Kapanadze AI Socrates — application logic (vanilla JS, no build step).
- * Requires js/questions.js (BANK, META, STAGE, COMP) to be loaded first.
+/* Kapanadze AI–Socrates · state, AI layer, evaluation, dialogue flow, question view, boot.
  *
- * Compatibility contract with EN-DEMO-4.2 (do not change without a migration plan):
- *  - localStorage keys KEY and ARCH, and the session object shape stored under them;
- *  - grading: classify() and its helpers clean(), numbers(), approx(), and the
- *    scoring rule in submit();
- *  - question selection (selectQuestions) and CSV columns (rowsForSession, csv).
- * Those functions are kept byte-for-byte identical to the original file.
+ * The dialogue logic, scoring and help ladder are unchanged from the original KA-5.0 program.
+ * Interface text goes through T(), learning content through TX() (js/i18n/i18n.js); state, logs
+ * and archive keep Georgian source strings, so switching the language never alters a session.
+ * In English mode, English answers are additionally recognised (see enMathPrep and enChecks);
+ * Georgian-mode evaluation is byte-for-byte the original.
  */
 
-const VERSION = 'EN-DEMO-4.3';
-const KEY = 'kapanadze-en-demo-session-v42', ARCH = 'kapanadze-en-demo-archive-v42';
+let Q=DEFAULT_Q;
+let selTopic=(()=>{try{const k=localStorage.getItem('kapanadze-sokrate-sel');return k&&(SCEN[k]||k==='other')?k:'half'}catch(e){return 'half'}})();
+function setSel(k){selTopic=k;try{localStorage.setItem('kapanadze-sokrate-sel',k)}catch(e){}}
+let theoryKey='derivative';
+const startDraft={};
 
-/* ------------------------------------------------------------------ helpers */
-
-const $ = s => document.querySelector(s);
-const escapeHTML = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
-
-let view = 'home', subject = 'half', session = null, graphA = 1;
-// What to focus after the next render: 'question' | 'hint' | 'heading' | a CSS selector.
-let focusNext = null;
-// Unsent answer text / confidence, kept in memory so hint requests and tab switches
-// do not wipe what the student has typed. Never written to storage.
-const EMPTY_DRAFT = {key: '', text: '', conf: ''};
-let draft = EMPTY_DRAFT;
-
-/* ------------------------------------------------------- storage (unchanged keys) */
-
-function getArchive() { try { return JSON.parse(localStorage.getItem(ARCH) || '[]'); } catch (e) { return []; } }
-function putArchive(o) { try { localStorage.setItem(ARCH, JSON.stringify(o)); return true; } catch (e) { return false; } }
-function save() { try { session && localStorage.setItem(KEY, JSON.stringify(session)); } catch (e) { /* storage unavailable */ } }
-function load() { try { return JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e) { return null; } }
-function forget(k) { try { localStorage.removeItem(k); return true; } catch (e) { return false; } }
-
-function download(name, data, type = 'text/plain;charset=utf-8') {
-  const b = new Blob(['﻿', data], {type}), u = URL.createObjectURL(b), a = document.createElement('a');
-  a.href = u; a.download = name; document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(u), 1000);
-}
-
-// Unchanged from EN-DEMO-4.2.
-function csv(rows){if(!rows.length)return '';const cols=Object.keys(rows[0]);const quote=v=>'"'+String(v??'').replace(/"/g,'""')+'"';return [cols.join(','),...rows.map(o=>cols.map(c=>quote(o[c])).join(','))].join('\r\n')}
-// Unchanged from EN-DEMO-4.2: defines the "short demonstration" question set.
-function selectQuestions(topic,subset){const all=BANK[topic];if(subset==='full')return all;let picks=[];for(const st of ['P','I','II','III','F']){const a=all.filter(q=>q.stage===st);if(!a.length)continue;let sel=a.filter(x=>x.comp==='proc').slice(0,2);if(st==='P')sel=a.slice(0,2);else if(st==='F')sel=a.slice(0,Math.min(2,a.length));else{const d=a.find(x=>x.comp==='decl');const r=a.find(x=>x.comp==='pers');sel=[d,...sel.slice(0,1),r].filter(Boolean)};picks.push(...new Set(sel));}return picks}
-
-/* ------------------------------------------- messages, dialog and focus management */
-
-// Sets an inline status/error message. `later` delays the update so screen readers
-// announce live regions that were only just inserted into the page.
-function say(sel, text, tone = '', later = false) {
-  const apply = () => { const el = $(sel); if (el) { el.textContent = text; el.className = 'message' + (tone ? ' ' + tone : ''); } };
-  later ? setTimeout(apply, 120) : apply();
-}
-
-// Accessible modal dialog used instead of the browser's alert/confirm boxes. Resolves true on OK.
-function openDialog({title, message, okLabel = 'OK', cancelLabel = '', danger = false}) {
-  const d = $('#dialog'), ok = $('#dialogOk'), cancel = $('#dialogCancel');
-  if (!d || typeof d.showModal !== 'function') return Promise.resolve(!cancelLabel);
-  $('#dialogTitle').textContent = title;
-  $('#dialogMsg').textContent = message;
-  ok.textContent = okLabel;
-  ok.classList.toggle('danger', danger);
-  ok.classList.toggle('primary', !danger);
-  cancel.textContent = cancelLabel || 'Cancel';
-  cancel.hidden = !cancelLabel;
-  d.returnValue = '';
-  return new Promise(resolve => {
-    ok.onclick = () => d.close('ok');
-    cancel.onclick = () => d.close('cancel');
-    d.addEventListener('close', () => { ok.onclick = cancel.onclick = null; resolve(d.returnValue === 'ok'); }, {once: true});
-    d.showModal();
-    (cancelLabel ? cancel : ok).focus(); // destructive confirmations start on Cancel
+/* ============ state ============ */
+const KEY='kapanadze-ai-socrates-topic-v3';
+let S=freshState();
+function freshState(){return {smode:'guided',scope:'full',qids:null,study:{code:'',group:'',method:'არ არის მითითებული',timepoint:'პილოტი'},archived:false,name:'',topic:'',grade:'9–10',questions:null,started:false,done:false,qi:0,level:0,tries:0,mode:'main',curPrompt:null,parentShown:false,results:{},errors:[],log:[],flags:[],turns:[],aiNote:'',notes:[],theoryId:null,hadPartial:false,curConf:0,firstVerdict:'',langs:[]};}
+function save(){try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){}}
+function load(){try{const s=JSON.parse(localStorage.getItem(KEY)||'null');if(s&&s.log)return s}catch(e){}return null}
+// Built-in banks are rebuilt from code (their check functions cannot be stored); AI-generated banks are restored from storage.
+function questionsFor(topic,saved){return offlineQuestions(topic)||(Array.isArray(saved)&&saved.length?saved:null)||DEFAULT_Q.map(q=>({...q}));}
+let sample=null, downloads=null, aiState='checking';
+const VERSION='KA-5.1';
+const ARCH='kapanadze-ai-socrates-archive-v5';
+const indep=()=>S.smode==='independent';
+const MODES={guided:'სოკრატული სწავლება (მინიშნებებით)',independent:'დამოუკიდებელი დიაგნოსტიკა (მინიშნებების გარეშე)'};
+const SCOPES={short:'მოკლე ვარიანტი',full:'სრული ბანკი'};
+const CONF5=[[1,'საერთოდ არ ვარ დარწმუნებული'],[2,'ნაკლებად'],[3,'ნაწილობრივ'],[4,'საკმაოდ'],[5,'სრულიად დარწმუნებული ვარ']];
+const HELPNAME={0:'დამოუკიდებლად',1:'მიმართული კითხვა',2:'ნაწილობრივი მინიშნება (სტრუქტურა)',3:'ანალოგიური ნაბიჯი',R:'სწორი პასუხი ნაჩვენებია'};
+// short variant: per stage — prerequisites: 3; levels: one declarative + one procedural + one metacognitive; final: 2
+function selectQuestions(all,scope){
+  if(scope!=='short') return all;
+  const out=[];
+  ['P','I','II','III','F'].forEach(st=>{
+    const a=all.filter(q=>q.stage===st); if(!a.length) return;
+    let sel;
+    if(st==='P') sel=a.slice(0,3);
+    else if(st==='F') sel=a.slice(0,2);
+    else sel=[a.find(x=>x.comp==='decl'),a.find(x=>x.comp==='proc'),a.find(x=>x.comp==='pers')].filter(Boolean);
+    sel.forEach(q=>{if(!out.includes(q)) out.push(q)});
   });
+  return out;
+}
+function applyScope(qs,qids){return Array.isArray(qids)&&qids.length?qs.filter(q=>qids.includes(q.id)):qs}
+function getArchive(){try{return JSON.parse(localStorage.getItem(ARCH)||'[]')}catch(e){return []}}
+function putArchive(a){try{localStorage.setItem(ARCH,JSON.stringify(a))}catch(e){status(T('ბრაუზერის მეხსიერება სავსეა — გთხოვთ, ჩამოტვირთოთ მონაცემები.'),'warn')}}
+async function downloadFile(name,data,type){
+  if(downloads){ try{ await downloads.save({filename:name,data:'﻿'+data}); return true; }catch(e){ if(e&&e.code==='cancelled') return false; } }
+  try{ const b=new Blob(['﻿',data],{type:type||'text/csv;charset=utf-8'}),u=URL.createObjectURL(b),a=document.createElement('a'); a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),1500); return true; }catch(e){ return false; }
+}
+function csvRows(rows){if(!rows.length)return '';const cols=Object.keys(rows[0]);const qv=v=>'"'+String(v??'').replace(/"/g,'""')+'"';return [cols.join(','),...rows.map(o=>cols.map(c=>qv(o[c])).join(','))].join('\r\n')}
+let busy=false, view='main';
+const PLOTV={};
+
+/* ============ AI layer (optional; active only inside the claude.ai runtime) ============ */
+const aiLang=()=>isEN()?'English':'Georgian';
+function chip(){
+  const c=document.getElementById('aiChip');
+  if(!c) return;
+  if(aiState==='on'){c.textContent=T('AI: ჩართულია');c.className='ai-chip on'}
+  else if(aiState==='checking'){c.textContent=T('AI: მოწმდება…');c.className='ai-chip'}
+  else {c.textContent=T('სკრიპტული რეჟიმი (AI-ის გარეშე)');c.className='ai-chip'}
+}
+function aiFail(e){
+  if(e&&['not_granted','sampling_disabled','not_declared','capability_disabled','capability_removed'].includes(e.code)){sample=null;aiState='off';chip();}
+}
+function tutorRules(){
+  const deriv=offlineTopicKey(S.topic)==='derivative';
+  return `You are part of "Kapanadze AI–Socrates", a Socratic mathematics tutor. The lecturer Davit Kapanadze designed the pedagogy. The current topic is: ${S.topic||'mathematics'}. Student level: ${S.grade||'9–10'}. Principles: never give ready-made results; one short question at a time about the nearest step only; never say "wrong" — make the student check their own reasoning using a small case, substitution, counterexample, diagram, table, estimate or another topic-appropriate verification; reply in natural ${aiLang()}; use plain text and readable mathematical notation, no Markdown and no LaTeX.`+
+  (deriv?` Method: Kapanadze's limit-free algebraic–geometric construction of the derivative. A tangent to the graph of a polynomial P at A(a; P(a)) is the line y = P(a) + k(x − a) for which x = a is at least a double root of P(x) − [P(a) + k(x − a)]; by Bezout P(x) − P(a) = (x − a)R(x) and k = R(a); the derivative is the function a ↦ k(a). Never use limits, infinitesimals or "the secant approaching the tangent"; rely on factoring, double roots, the discriminant and Bezout's theorem.`:'')+
+  (offlineTopicKey(S.topic)==='half'?` Method: Kapanadze's algebraic-operator construction of the half-derivative on monomials (x > 0): H = D^(1/2) with H∘H = D; assumption H x^β = c(β)·x^(β−1/2), H linear; recurrence c(β)·c(β − 1/2) = β; c(0) = c₀ ≠ 0 is free; c(n) = c₀(2n)!!/(2n−1)!!, c(n − 1/2) = (2n−1)!!/(2c₀(2n−2)!!); c(−1/2) = 0; c₀ cancels in H∘H; c₀ = 1/√π is a CONVENTION chosen to agree with the Riemann–Liouville formula, not a consequence. Do not use integrals, limits or the Gamma function unless the student raises them; keep c₀ an agreement.`:'')+
+  (offlineTopicKey(S.topic)==='pyramids'?` IMPORTANT: this topic is HISTORY, not mathematics (ancient Egyptian pyramids; school level about grades 6–9). Ignore the remark about mathematical notation. Guide the student to reason from evidence: archaeological finds (workers' village and tombs at Giza), inscriptions, papyri (Diary of Merer from Wadi al-Jarf), tomb paintings (Djehutihotep sledge); distinguish primary sources from films, myths and the internet; keep dates approximate (Djoser c. 2670 BC, Khufu c. 2560 BC); treat the exact construction method (ramps) as still debated.`:'');
+}
+const PROG_SECRETS=['aₙ = a₁ + (n − 1)d','a1+(n-1)d','bₙ = b₁qⁿ⁻¹','b1*q^(n-1)','q^(n-1)','(n-1)d','(n − 1)d'];
+function secretsOf(q){const k=offlineTopicKey(S.topic);return (q.secret||[]).concat(['ap','gp','apsum','gpsum'].includes(k)?PROG_SECRETS:[]);}
+function leaks(text,q){
+  if(q.noLeak) return false;
+  if(offlineTopicKey(S.topic)==='ap'&&(q.id==='III-D'||q.id==='III-D2')) return false;
+  const t=norm(text).replace(/\s/g,'');
+  return secretsOf(q).some(s=>{const k=norm(s).replace(/\s/g,'');return k.length>1&&t.includes(k)});
+}
+async function aiJudge(q,answer){
+  const prompt=`${tutorRules()}
+
+Task: judge a student's answer. Be lenient about wording, notation and spelling; judge the mathematical idea.
+Topic: ${S.topic}\nQuestion: ${plain(TX(q.text))}\nWhat a correct answer contains (for you only, never reveal): ${q.rubric||plain(q.reveal||'')}
+Student's answer: ${answer}
+
+Reply with only JSON: {"verdict":"correct"|"partial"|"wrong","misconception":"short ${aiLang()} label, or empty","followup":"if not correct: ONE short Socratic control question in ${aiLang()} that makes the student test their own answer; it must not state the correct answer. Empty if correct."}`;
+  const r=await sample.json(prompt,{modelTier:'quick'});
+  if(!r||!['correct','partial','wrong'].includes(r.verdict)) throw {code:'invalid_json'};
+  return r;
+}
+async function aiSimpler(q,level,history){
+  const LV={1:'level 1 — a directed question that focuses attention on the needed property',2:'level 2 — a partial hint: offer a structure (a small table, a list to complete), without the result',3:'level 3 — an analogous step in a different, everyday or smaller situation; the student then does the target step'};
+  const prompt=`${tutorRules()}
+
+The student pressed "I'm stuck" on this question: ${plain(TX(q.text))}
+Write ONE new, simpler question at help ${LV[level]}.
+The lecturer's own example for this level: ${plain(TX(q.ladder[level-1]))}
+Dialogue so far on this question:
+${history||'(nothing yet)'}
+Hard rules: at most two short sentences; do not repeat an earlier question word for word; never state any of these results: ${secretsOf(q).join(' ; ')||'(the final answer)'}.
+Reply with only JSON: {"question":"..."}`;
+  const r=await sample.json(prompt,{modelTier:'quick',cache:false});
+  const txt=r&&typeof r.question==='string'?r.question.trim():'';
+  if(!txt||txt.length>400||leaks(txt,q)) return null;
+  return txt;
 }
 
-function applyFocus() {
-  const f = focusNext; focusNext = null;
-  if (!f) return;
-  const el = f === 'question' ? $('#qText')
-    : f === 'hint' ? ($('#hintBox') || $('#qText'))
-    : f === 'heading' ? $('#app h2')
-    : $(f);
-  if (!el) return;
-  if (!el.matches('a[href],button,input,select,textarea,[tabindex]')) el.tabIndex = -1;
-  el.focus();
-}
-
-/* ------------------------------------------------------------------ navigation */
-
-const tabs = [...document.querySelectorAll('[role="tab"]')];
-
-function goto(v, focusTab = false) {
-  captureDraft();
-  view = v;
-  for (const b of tabs) {
-    const on = b.dataset.view === v;
-    b.classList.toggle('active', on);
-    b.setAttribute('aria-selected', String(on));
-    b.tabIndex = on ? 0 : -1;
-    if (on && focusTab) b.focus();
-  }
-  $('#app').setAttribute('aria-labelledby', 'tab-' + v);
-  render();
-}
-
-tabs.forEach((b, i) => {
-  b.addEventListener('click', () => goto(b.dataset.view));
-  b.addEventListener('keydown', e => {
-    const n = {ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1}[e.key];
-    if (n === undefined) return;
-    e.preventDefault();
-    goto(tabs[(n + tabs.length) % tabs.length].dataset.view, true);
+/* ============ English answers (English mode only) ============ */
+// Number words are mapped to the Georgian words the original strict reader understands, and the
+// remaining English words to a Georgian placeholder letter, so the original math parsers treat
+// English prose exactly as they treat Georgian prose. Mathematical criteria are not changed.
+const EN_NUMBER_WORDS=[
+  [/\b(?:none|zero)\b|\bno\s+(?:common\s+|real\s+|shared\s+|intersection\s+)?(?:points?|intersections?|solutions?|roots?)\b|\b(?:do|does|did)\s*(?:n['’]t|not)\s+(?:intersect|meet|cross|touch)\w*|\bnever\s+(?:intersect|meet|cross)\w*/gi,' არც ერთი '],
+  [/\b(?:one|single|unique)\b/gi,' ერთი '],[/\btwo\b/gi,' ორი '],[/\bthree\b/gi,' სამი '],[/\bfour\b/gi,' ოთხი '],
+  [/\bfive\b/gi,' ხუთი '],[/\bsix\b/gi,' ექვსი '],[/\btwelve\b/gi,' თორმეტი ']
+];
+const EN_SHORT_WORDS=new Set(['is','it','so','of','to','in','by','be','we','as','at','or','if','on','my','me','do','no','up','us','he','am','go','im']);
+const EN_KEEP=new Set(['sqrt','pi']);
+function enMathPrep(s){
+  let t=String(s).replace(/(\d{1,3})(?:,(\d{3}))+(?!\d)/g,m=>m.replace(/,/g,''));   // 2,300,000 → 2300000
+  for(const [re,ka] of EN_NUMBER_WORDS) t=t.replace(re,ka);
+  t=t.replace(/[A-Za-z]+(?:['’][A-Za-z]+)*/g,w=>{
+    const lw=w.toLowerCase();
+    if(EN_KEEP.has(lw)) return w;
+    if(lw.length>=3||EN_SHORT_WORDS.has(lw)||/['’]/.test(lw)) return ' ა ';
+    return w;
   });
-});
-
-function render() {
-  const app = $('#app');
-  if (view === 'teacher') teacherView(app);
-  else if (view === 'research') researchView(app);
-  else if (session && !session.finished) questionView(app);
-  else if (session && session.finished) reportView(app);
-  else homeView(app);
-  applyFocus();
+  return t.replace(/(^|[^A-Za-z0-9_])[ai]\s+(?=ა)/g,'$1ა ');                        // article “a” / pronoun “I”
+}
+function reflectFeaturesBoth(t){
+  const step=/(კითხვ|ნაბიჯ|ეტაპ|გამიჭირდ|გამიძნელდ|როცა|ადგილ|ამოცან)/.test(t)||/(question|step|stage|hard|difficult|struggl|stuck|when|part|problem|task|tricky)/.test(t);
+  const tool=/(გრაფიკ|ცხრილ|მაგალით|ფორმულ|ჩავსვ|ჩასმ|დავშალ|დაშლ|მამრავლ|ფესვ|სლაიდერ|ნახაზ|ბეზუ|შევადარ|დისკრიმინ|წყვილ|წყარო|რუკ|თარიღ|გამოთვ|შედარ|მტკიცებ|არქეოლოგ)/.test(t)||/(graph|table|example|formula|substitut|factor|root|slider|diagram|drawing|bezout|bézout|compar|discriminant|pair|source|map|date|calculat|comput|proof|evidence|archaeolog|archeolog)/.test(t);
+  const check=/(შევამოწმ|შემოწმ|გადავამოწმ|დავრწმუნდ|გადამოწმ|ჩავსვი|შევადარე|დავითვალე|გავხსენი)/.test(t)||/(check|verif|made sure|make sure|substituted|plugged|compared|counted|expanded|tested|confirm)/.test(t);
+  return step+tool+check;
 }
 
-/* ------------------------------------------------------------------ student: home */
-
-function homeView(app) {
-  const resumed = load();
-  const canResume = resumed && !resumed.finished && META[resumed.topic] && Array.isArray(resumed.questions);
-  app.innerHTML = `<section class="card">
-    <h2>Choose a topic</h2>
-    <p class="lead">Four complete English-language question banks adapted from the original Kapanadze AI Socrates program.</p>
-    ${canResume ? `<div class="note resume-note"><div><b>Unfinished session:</b> ${escapeHTML(META[resumed.topic].title)} · question ${Math.min(resumed.qi + 1, resumed.questions.length)} of ${resumed.questions.length}</div><button type="button" class="btn primary sm" id="resume">Resume a saved session</button></div>` : ''}
-    <div class="grid topics">${Object.entries(META).map(([k, v]) => `<button type="button" class="topic" data-topic="${k}">
-        <strong class="topic-title">${escapeHTML(v.title)}</strong>
-        <span class="topic-level">${escapeHTML(v.level)}</span>
-        <span class="topic-desc">${escapeHTML(v.short)}</span>
-        <span class="topic-count">${BANK[k].length} questions</span>
-      </button>`).join('')}</div>
-    <div class="note caution"><b>Research prototype:</b> Socratic hints work without internet. There is no connected generative AI service in this standalone file. Free-text mathematical and historical answers may require lecturer review, rather than being declared correct automatically.</div>
-  </section>`;
-  app.querySelectorAll('[data-topic]').forEach(b => b.onclick = () => { subject = b.dataset.topic; focusNext = 'heading'; setupView(app); applyFocus(); });
-  if ($('#resume')) $('#resume').onclick = () => { session = resumed; subject = session.topic; focusNext = 'question'; render(); };
+/* ============ evaluation ============ */
+function reflectFeatures(t){
+  const step=/(კითხვ|ნაბიჯ|ეტაპ|გამიჭირდ|გამიძნელდ|როცა|ადგილ|ამოცან)/.test(t);
+  const tool=/(გრაფიკ|ცხრილ|მაგალით|ფორმულ|ჩავსვ|ჩასმ|დავშალ|დაშლ|მამრავლ|ფესვ|სლაიდერ|ნახაზ|ბეზუ|შევადარ|დისკრიმინ|წყვილ|წყარო|რუკ|თარიღ|გამოთვ|შედარ|მტკიცებ|არქეოლოგ)/.test(t);
+  const check=/(შევამოწმ|შემოწმ|გადავამოწმ|დავრწმუნდ|გადამოწმ|ჩავსვი|შევადარე|დავითვალე|გავხსენი)/.test(t);
+  return step+tool+check;
 }
-
-/* ------------------------------------------------------------------ student: setup */
-
-function setupView(app) {
-  const m = META[subject];
-  app.innerHTML = `<section class="card">
-    <button type="button" id="back" class="btn soft sm">← Topics</button>
-    <h2 class="setup-title">${escapeHTML(m.title)}</h2>
-    <p class="small">${escapeHTML(m.level)} · ${BANK[subject].length} questions</p>
-    <div class="form-grid">
-      <div><label for="mode">Learning / assessment mode</label><select id="mode"><option value="guided">Guided Socratic learning</option><option value="independent">Independent diagnostic (no hints)</option></select></div>
-      <div><label for="scope">Question set</label><select id="scope"><option value="sample">Short demonstration (about 10 questions)</option><option value="full">Complete bank (${BANK[subject].length} questions)</option></select></div>
-      <div><label for="code">Anonymous student code (optional)</label><input id="code" maxlength="48" placeholder="e.g. IR-001" autocomplete="off"></div>
-      <div><label for="group">Group / class (optional)</label><input id="group" maxlength="48" placeholder="e.g. Pilot A" autocomplete="off"></div>
-      <div><label for="method">Teaching approach / prior instruction</label><select id="method"><option value="not recorded">Not recorded</option><option value="limit-first">Limit-first derivative instruction</option><option value="algebraic-geometric">Algebraic–geometric construction</option><option value="mixed/other">Mixed or other instruction</option></select></div>
-      <div><label for="timepoint">Study stage</label><select id="timepoint"><option value="pilot">Pilot / demonstration</option><option value="pretest">Pretest</option><option value="posttest">Posttest</option><option value="follow-up">Delayed follow-up</option></select></div>
-    </div>
-    <div class="consent">
-      <label class="check" for="consent"><input type="checkbox" id="consent" aria-describedby="consentMsg"><span>I understand that my answers are saved only in this browser for review/export. Do not enter names or personal information.</span></label>
-      <p id="consentMsg" class="message" role="alert"></p>
-    </div>
-    <div class="buttons"><button type="button" class="btn primary" id="start">Start session</button><button type="button" class="btn soft" id="openTheory">View lecturer notes</button></div>
-    <p class="small">The 'Lecturer' and 'Researcher' tabs are open demonstration panels, not secure access controls.</p>
-  </section>`;
-  const consent = $('#consent');
-  consent.onchange = () => { if (consent.checked) { consent.removeAttribute('aria-invalid'); say('#consentMsg', ''); } };
-  $('#back').onclick = () => { focusNext = `[data-topic="${subject}"]`; render(); };
-  $('#openTheory').onclick = () => goto('teacher');
-  $('#start').onclick = () => {
-    if (!consent.checked) {
-      consent.setAttribute('aria-invalid', 'true');
-      say('#consentMsg', 'Please confirm the local storage notice.', 'warn');
-      consent.focus();
-      return;
+function ruleJudge(q,answer){
+  const c=q.check, t=norm(answer);
+  const en=enChecks(q);                                   // null in Georgian mode
+  const ma=en?enMathPrep(answer):answer;                   // text given to the math parsers
+  const reHit=(e,i)=>e.re.test(t)||!!(en&&en.$re&&en.$re[i]&&en.$re[i].test(t));
+  if(c.type==='num'){
+    if((c.alt&&c.alt(t))||(en&&en.$alt&&en.$alt(t))) return {verdict:'correct'};
+    for(const [i,e] of (c.errors||[]).entries()){ if(e.re&&e.first&&reHit(e,i)) return {verdict:'wrong',err:e.err,follow:e.follow}; }
+    const nums=c.strict?numbersStrict(ma):numbers(ma);
+    if(c.expect.every(v=>has(nums,v))) return {verdict:'correct'};
+    for(const [i,e] of (c.errors||[]).entries()){
+      if(e.re){ if(reHit(e,i)) return {verdict:'wrong',err:e.err,follow:e.follow}; continue; }
+      if(e.approx?hasApprox(nums,e.v):has(nums,e.v)) return {verdict:'wrong',err:e.err,follow:e.follow};
     }
-    const mode = $('#mode').value, scope = $('#scope').value;
-    const study = {code: $('#code').value.trim(), group: $('#group').value.trim(), method: $('#method').value, timepoint: $('#timepoint').value};
-    session = {version: VERSION, topic: subject, mode, scope, study, started: new Date().toISOString(), qi: 0, questions: selectQuestions(subject, scope).map(q => q.id), results: [], hints: 0, attempts: 0, firstCount: 0, finished: false, progress: {attempts: 0, hints: 0}};
-    draft = EMPTY_DRAFT;
-    focusNext = 'question';
-    save(); render();
-  };
-}
-
-/* --------------------------------------------------------------- student: question */
-
-function current() { return BANK[session.topic].find(q => q.id === session.questions[session.qi]); }
-function draftKey() { return session ? session.started + '#' + session.qi : ''; }
-function captureDraft() {
-  const t = $('#studentAnswer');
-  if (!t || !session) return;
-  const c = $('input[name="conf"]:checked');
-  draft = {key: draftKey(), text: t.value, conf: c ? c.value : ''};
-}
-
-function questionView(app) {
-  const q = current(); if (!q) { finish(); return; }
-  const result = session.results[session.qi] || {attempts: [], hints: 0, confidence: 0, firstVerdict: null, status: 'pending', score: null, revealed: false};
-  session.results[session.qi] = result;
-  const idx = session.qi + 1, total = session.questions.length, guided = session.mode === 'guided';
-  const d = draft.key === draftKey() ? draft : EMPTY_DRAFT;
-  const confScale = v => v === 1 ? ' (very uncertain)' : v === 5 ? ' (very certain)' : '';
-  app.innerHTML = `<section class="card q-card">
-    <div class="row spread q-head">
-      <span class="pill accent">${escapeHTML(META[session.topic].title)}</span>
-      <span class="small" id="qMeta">Question ${idx} of ${total} · ${STAGE[q.stage]}</span>
-    </div>
-    <div class="meter" role="progressbar" aria-label="Session progress" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${idx - 1}" aria-valuetext="${idx - 1} of ${total} answered"><i></i></div>
-    <div class="row"><span class="pill">${COMP[q.comp]}</span><span class="pill">${guided ? 'Guided learning' : 'Independent diagnosis'}</span></div>
-    <p class="question" id="qText" tabindex="-1">${escapeHTML(q.text)}</p>
-    ${session.topic === 'derivative' && q.stage === 'II' ? derivativeGraph() : ''}
-    ${result.hints > 0 && guided ? `<div class="hints" id="hintBox" tabindex="-1"><b>Socratic prompt ${result.hints}/3:</b> ${escapeHTML(hint(session.topic, q, result.hints))}</div>` : ''}
-    <label for="studentAnswer">Your answer and reasoning</label>
-    <textarea id="studentAnswer" placeholder="Write your reasoning, not just a final result." aria-describedby="answerTip" aria-keyshortcuts="Control+Enter Meta+Enter"></textarea>
-    <p class="small tip" id="answerTip">Tip: Ctrl + Enter (⌘ + Enter on Mac) submits.</p>
-    ${!result.attempts.length
-      ? `<fieldset class="conf-group" aria-describedby="confHelp"><legend>How confident are you? <span class="small">(before feedback)</span></legend>
-          <div class="conf">${[1, 2, 3, 4, 5].map(v => `<label><input type="radio" name="conf" value="${v}"${d.conf === String(v) ? ' checked' : ''}><span>${v}</span><span class="sr-only">${confScale(v)}</span></label>`).join('')}</div>
-          <p class="small" id="confHelp">1 = very uncertain; 5 = very certain.</p></fieldset>`
-      : `<p class="small">First-response confidence: ${result.confidence}/5 · Attempts: ${result.attempts.length} · Hints: ${result.hints}</p>`}
-    <div id="feedback" class="message" role="status" aria-live="polite"></div>
-    <div class="buttons">
-      <button type="button" class="btn primary" id="submit">Submit response</button>
-      ${guided ? '<button type="button" class="btn soft" id="hint">I need a hint</button>' : ''}
-      <button type="button" class="btn soft" id="skip">${session.mode === 'independent' ? 'Record as unknown' : 'Skip / cannot solve'}</button>
-    </div>
-    <p class="small">Open-ended responses may be flagged for human review. They are not automatically counted as incorrect.</p>
-  </section>`;
-  app.querySelector('.meter > i').style.width = (100 * (idx - 1) / total) + '%';
-  const ta = $('#studentAnswer');
-  ta.value = d.text;
-  ta.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(); } });
-  const syncConf = () => app.querySelectorAll('.conf label').forEach(l => l.classList.toggle('is-checked', l.querySelector('input').checked));
-  app.querySelectorAll('input[name="conf"]').forEach(r => r.addEventListener('change', syncConf));
-  syncConf();
-  if ($('#slope')) $('#slope').oninput = e => {
-    graphA = +e.target.value;
-    $('#graph').innerHTML = graphSVG(graphA);
-    $('#slab').textContent = slopeText();
-    e.target.setAttribute('aria-valuetext', slopeText());
-  };
-  $('#submit').onclick = () => submit();
-  if ($('#hint')) $('#hint').onclick = () => requestHint();
-  $('#skip').onclick = () => skip();
-  applyFocus();
-}
-
-/* ------------------------------------------------------------------ Socratic hints */
-
-const CUSTOM_HINTS = {
-  'ap:II-P2': ['Write the first three terms using a₁ and d.', 'How many additions of d occur between the first and n-th term?', 'Test your proposed formula with n = 1 and n = 2.'],
-  'ap:III-P': ['How many gaps separate positions 4 and 10?', 'Find the change in value across those six gaps.', 'Use a₄ = a₁ + 3d to recover the first term.'],
-  'derivative:II-P1': ['Subtract the line equation from x².', 'Factor out (x − 3).', 'What value of k would make the remaining factor vanish at x = 3?'],
-  'derivative:III-P1': ['Use x³ − 8 = (x − 2)(x² + 2x + 4).', 'Subtract k(x − 2) and factor out (x − 2).', 'Evaluate the second factor at x = 2.'],
-  'half:II-P2': ['Write H(Hx^β) using c(β) and c(β−1/2).', 'Compare its exponent with D(x^β).', 'Equate the numerical coefficients of x^(β−1).'],
-  'half:II-P3': ['Replace β with 1/2 in the recurrence.', 'Then write c(0) as c₀.', 'Isolate c(1/2) by dividing through by c₀.'],
-  'pyramids:I-R': ['Is a film a primary archaeological document?', 'What evidence did the excavations at Giza uncover?', 'Which type of source would let you verify a specific historical claim?']
-};
-const TOPIC_HINTS = {
-  ap: ['What remains constant between successive terms?', 'Test the rule on a smaller position, such as n = 1 or n = 2.', 'How could you check your result by substitution or a short table?'],
-  derivative: ['What equation connects the curve with the line?', 'Try factoring the polynomial difference at the chosen point.', 'What would ensure that the contact point is a repeated root?'],
-  half: ['What does H∘H = D require in this example?', 'Write the coefficient recurrence before inserting numbers.', 'Check both the power of x and the coefficient, including the chosen normalisation.'],
-  pyramids: ['What evidence, rather than a story, is relevant to this question?', 'Can you locate a historical source, date or archaeological find?', 'What alternative explanation should you compare, and how could you check it?']
-};
-
-// Returns Socratic prompt n (1–3) for question q of the given topic.
-function hint(topic, q, n) {
-  const custom = CUSTOM_HINTS[topic + ':' + q.id];
-  return custom ? custom[n - 1] : TOPIC_HINTS[topic][n - 1];
-}
-
-/* ------------------------------------------- grading — unchanged from EN-DEMO-4.2 */
-
-function clean(s){return String(s).toLowerCase().replace(/[−–—]/g,'-').replace(/\s/g,'').replace(/×|·/g,'*').replace(/²/g,'^2').replace(/³/g,'^3').replace(/⁴/g,'^4').replace(/⁵/g,'^5').replace(/₀/g,'0').replace(/₁/g,'1').replace(/₆/g,'6').replace(/√/g,'sqrt').replace(/[(){}]/g,'').replace(/[.,:;]+$/g,'')}
-function numbers(s){let t=String(s).replace(/a[₀-₉]+|a_\d+|\ba\d+\b|x[₀-₉]+/gi,'VAR').replace(/\^\s*[−-]?\d+(?:\/\d+)?/g,' ');return [...t.matchAll(/(?<![A-Za-z])[-−]?\d+(?:[.,]\d+)?/g)].map(x=>Number(x[0].replace('−','-').replace(',','.'))).filter(Number.isFinite)}
-function approx(a,b){return Math.abs(a-b)<0.025*Math.max(1,Math.abs(b))}
-function classify(q,a){const typ=q.kind;let ans=a.trim();if(!ans)return {verdict:'empty'};
- if(typ==='num') {const nums=numbers(ans),ex=q.expect||[]; if(ex.length){if(ex.length===1){if(nums.length===1&&approx(nums[0],ex[0]))return {verdict:'correct'};if(nums.length===1)return{verdict:'wrong'};return{verdict:'review'}}if(nums.length===ex.length&&ex.every((v,i)=>approx(nums[i],v)))return{verdict:'correct'};if(nums.length===ex.length)return{verdict:'wrong'};return{verdict:'review'}}return{verdict:'review'}}
- if(typ==='range'){const nums=numbers(ans);if(nums.length===1&&nums[0]>=q.min&&nums[0]<=q.max)return{verdict:'correct'};if(nums.length===1)return{verdict:'wrong'};return{verdict:'review'}}
- if(typ==='formula'){const z=clean(ans).replace(/^a[nₙ]=?/,'').replace(/^an=/,'');if((q.aliases||[]).some(t=>clean(t).replace(/^an=/,'')===z))return {verdict:'correct'};return{verdict:'review'}}
- if(['expr','text'].includes(typ)){const z=clean(ans),sol=clean(q.solution);if(z===sol&&z.length>1)return{verdict:'correct'};if(typ==='text'&&q.solution==='Africa.'&&/africa/i.test(ans))return{verdict:'correct'};return{verdict:'review'}}
- return {verdict:'review'};}
-
-/* ------------------------------------------------------------- answering workflow */
-
-// The verdict handling and the scoring rule below are unchanged from EN-DEMO-4.2;
-// only the messages and focus handling differ.
-function submit() {
-  const ans = $('#studentAnswer').value.trim();
-  const r = session.results[session.qi], q = current();
-  if (!ans) { say('#feedback', 'Please write an answer or choose Skip.', 'warn'); $('#studentAnswer').focus(); return; }
-  if (!r.attempts.length) {
-    const c = $('input[name="conf"]:checked');
-    if (!c) { say('#feedback', 'Select your confidence level before submitting the first response.', 'warn'); $('input[name="conf"]').focus(); return; }
-    r.confidence = +c.value;
+    if(c.expect.length>1&&c.expect.some(v=>has(nums,v))) return {verdict:'partial'};
+    return {verdict:'wrong'};
   }
-  const j = classify(q, ans), first = r.attempts.length === 0;
-  r.attempts.push({answer: ans, time: new Date().toISOString(), verdict: j.verdict, helpBefore: r.hints});
-  r.status = j.verdict; if (first) r.firstVerdict = j.verdict;
-  if (j.verdict === 'correct') { r.score = r.hints === 0 && r.attempts.length === 1 ? 2 : (r.hints <= 1 ? 1.5 : 1); r.finalAnswer = ans; advance(); return; }
-  if (j.verdict === 'review') { r.score = null; r.finalAnswer = ans; r.status = 'lecturer review'; advance(); return; }
-  if (session.mode === 'independent') { r.score = 0; r.finalAnswer = ans; advance(); return; }
-  if (r.hints < 3) {
-    r.hints++; session.hints++; save();
-    captureDraft(); focusNext = 'hint';
-    questionView($('#app'));
-    say('#feedback', 'Not yet confirmed. Try the Socratic prompt and revise your answer.', 'warn', true);
+  if(c.type==='range'){
+    const nums=numbers(ma);
+    if(nums.some(v=>v>=c.min&&v<=c.max)) return {verdict:'correct'};
+    for(const e of (c.errors||[])){ if(nums.some(v=>v>=e.min&&v<=e.max)) return {verdict:'wrong',err:e.err,follow:e.follow}; }
+    return {verdict:'wrong'};
+  }
+  if(c.type==='formula'){
+    const f=formulaFn(ma);
+    if(f){
+      if(sameFn(f,c.expect)) return {verdict:'correct'};
+      for(const e of c.errors){ if(sameFn(f,e.f)) return {verdict:'wrong',err:e.err,follow:e.follow}; }
+      return {verdict:'wrong'};
+    }
+    return {verdict:'unknown'};
+  }
+  if(c.type==='expr'){
+    const p=exprParse(ma,c.vars);
+    if(!p) return {verdict:'unknown'};
+    if(sameExpr(p.f,c.expect,c.vars.length,c.pos)){
+      if(c.factored&&!p.factored) return {verdict:'partial',follow:c.factoredFollow};
+      return {verdict:'correct'};
+    }
+    for(const e of (c.errors||[])){ if(sameExpr(p.f,e.f,c.vars.length,c.pos)) return {verdict:'wrong',err:e.err,follow:e.follow}; }
+    return {verdict:'wrong'};
+  }
+  if(c.type==='text'){
+    for(const [i,e] of (c.errors||[]).entries()){ if(reHit(e,i)) return {verdict:'wrong',err:e.err,follow:e.follow}; }
+    if(c.kw(t)||(en&&en.$kw&&en.$kw(t))) return {verdict:'correct'};
+    if((c.kwPart&&c.kwPart(t))||(en&&en.$kwPart&&en.$kwPart(t))) return {verdict:'partial',soft:true};
+    return {verdict:'wrong',soft:true};
+  }
+  if(c.type==='ai') return {verdict:'unknown'};
+  if(c.type==='reflect'){
+    const k=en?reflectFeaturesBoth(t):reflectFeatures(t);
+    if(k>=3||(k===2&&t.length>=120)) return {verdict:'correct',soft:true};
+    if(k>=1&&t.length>=20) return {verdict:'partial',soft:true};
+    return {verdict:'wrong',soft:true};
+  }
+  return {verdict:'unknown'};
+}
+const GENERIC_FOLLOW={
+  num:'შეამოწმე შენი პასუხი: ჩასვი ის პირობაში ან სცადე იგივე წესი პატარა შემთხვევაზე. ემთხვევა?',
+  formula:'შეამოწმე შენი ფორმულა პატარა შემთხვევებზე: ჩასვი `n` = 1 და `n` = 2. ემთხვევა პირველი და მეორე წევრის აგების წესს?',
+  range:'შეამოწმე გამოთვლა: რომელი მოქმედება გჭირდება — შეკრება, გამოკლება, გაყოფა? დაამრგვალე და შეაფასე, დამაჯერებელია თუ არა შედეგი.',
+  expr:'შეამოწმე შენი გამოსახულება კონკრეტულ რიცხვზე: ჩასვი, მაგალითად, a = 1 ან a = 2 და შეადარე პირდაპირ გამოთვლას.',
+  text:'შეგიძლია უფრო ზუსტად ახსნა? მოიყვანე კონკრეტული მაგალითი და შეამოწმე მასზე შენი ნათქვამი.',
+  reflect:'დაასახელე ერთი კონკრეტული ნაბიჯი, რომელიც გაგიჭირდა, რა გააკეთე, რომ გადალახე, და როგორ შეამოწმე შედეგი.',
+  ai:'შეამოწმე შენი პასუხი კონკრეტული მაგალითით ან სხვა გზით და ახსენი, რას ამოწმებ.'
+};
+async function judge(q,ans){
+  let r=ruleJudge(q,ans);
+  if(sample&&(r.verdict==='unknown'||r.soft||(r.verdict==='wrong'&&!r.err))){
+    try{
+      const a=await aiJudge(q,ans);
+      r={verdict:a.verdict,err:r.err,errLabel:a.misconception||'',follow:a.followup&&!leaks(a.followup,q)?a.followup:(r.follow||null),ai:true};
+    }catch(e){aiFail(e)}
+  }
+  if(r.verdict==='unknown') r={verdict:'wrong'};
+  return r;
+}
+
+async function generateTopicQuestions(topic,grade){
+  if(!sample) throw new Error('AI_REQUIRED');
+  const L=aiLang();
+  const prompt=`You design a Socratic diagnostic sequence for a ${isEN()?'':'Georgian '}mathematics student.
+Topic: ${topic}
+Grade/level: ${grade}
+
+Keep this FIXED methodology:
+1) prerequisite knowledge;
+2) Level I basic; Level II intermediate; Level III advanced/transfer;
+3) within each level assess declarative (what I know), procedural (how I do it), and reflective/metacognitive (how I reason/check);
+4) never require memorized wording when mathematical understanding can be shown another way;
+5) questions must support Socratic help without revealing the answer;
+6) finish with an independent final check without help.
+
+Create exactly 17 questions: 5 prerequisite P1–P5; then 3 for level I (I-D, I-P, I-R); 3 for level II (II-D, II-P, II-R); 3 for level III (III-D, III-P, III-R); then 3 final independent questions F1–F3 (stage F) on a new example. The R question at level III must explicitly ask for reflection and self-checking.
+
+For every question return: id, stage (P/I/II/III/F), comp (pre/decl/proc/pers), skill (short ${L} phrase; required for P only, optional otherwise), text (${L}), rubric (English or ${L} private grading criterion), reveal (a short ${L} explanation of the correct answer, shown only after all help is exhausted), ladder (exactly 3 progressively simpler Socratic prompts in ${L}). Optional intro may define a term only AFTER a discovery question and must never contain the answer to the current question.
+
+Difficulty must be age-appropriate and mathematically correct. Include representations or transfer where natural for the topic. Do not include multiple-choice. Do not reveal final answers in ladder prompts.
+
+Reply only JSON: {"questions":[...]} . Each question should also contain "check":{"type":"ai"}.`;
+  const r=await sample.json(prompt,{modelTier:'quick',cache:false});
+  if(!r||!Array.isArray(r.questions)||r.questions.length<12) throw new Error('BAD_QUESTIONS');
+  const validStages=new Set(['P','I','II','III','F']), validComp=new Set(['pre','decl','proc','pers']);
+  return r.questions.map((q,i)=>({
+    id:String(q.id||('Q'+(i+1))), stage:validStages.has(q.stage)?q.stage:'I', comp:validComp.has(q.comp)?q.comp:'proc',
+    skill:String(q.skill||q.text||('უნარი '+(i+1))).slice(0,90), text:String(q.text||''), rubric:String(q.rubric||''), reveal:q.reveal?String(q.reveal):'',
+    ladder:Array.isArray(q.ladder)&&q.ladder.length>=3?q.ladder.slice(0,3).map(String):['რა არის ამ ამოცანის პირველი მცირე ნაბიჯი?','შეგიძლია პატარა მაგალითზე სცადო?','როგორ გადაამოწმებ მიღებულ პასუხს?'],
+    intro:q.intro?esc(String(q.intro)):'', check:{type:'ai'}
+  })).filter(q=>q.text);
+}
+
+/* ============ flow ============ */
+function curQ(){return Q[S.qi]}
+function logTurn(kind,prompt,answer,extra){
+  const q=curQ();
+  S.log.push(Object.assign({t:new Date().toISOString(),q:q.id,stage:q.stage,comp:q.comp,kind,help:S.level,prompt:plain(prompt),answer:answer||''},extra||{}));
+}
+function historyText(){
+  return S.turns.map(x=>(x.who==='ai'?'Tutor: ':'Student: ')+plain(TX(x.text))).join('\n');
+}
+function correctAnswerText(q){
+  if(q.answer) return 'სწორი პასუხი და ახსნა: '+q.answer;
+  if(q.reveal) return q.reveal;
+  const topic=(S.topic||'').toLowerCase();
+  if(q.check&&q.check.type==='formula'){
+    if(topic.includes('არითმეტიკული პროგრესიის n-ური წევრის')) return 'სწორი ფორმულაა: `a_n = a_1 + (n − 1)d`. `a_1`-დან `a_n`-მდე არის `n − 1` თანაბარი ნაბიჯი, ამიტომ `d` ემატება `n − 1`-ჯერ.';
+    if(topic.includes('გეომეტრიული პროგრესიის n-ური წევრის')) return 'სწორი ფორმულაა: `b_n = b_1 · q^{n−1}`. `b_1`-დან `b_n`-მდე `q`-ზე გამრავლება ხდება `n − 1`-ჯერ.';
+    if(topic.includes('არითმეტიკული პროგრესიის პირველი n წევრის ჯამის')) return 'სწორი ფორმულაა: `S_n = n(a_1 + a_n)/2`, ხოლო `a_n = a_1 + (n − 1)d`-ის ჩასმით: `S_n = n[2a_1 + (n − 1)d]/2`.';
+    if(topic.includes('გეომეტრიული პროგრესიის პირველი n წევრის ჯამის')) return 'თუ `q ≠ 1`, სწორი ფორმულაა: `S_n = b_1(q^n − 1)/(q − 1)`. თუ `q = 1`, მაშინ `S_n = nb_1`.';
+  }
+  if(q.check&&q.check.type==='num'&&Array.isArray(q.check.expect)){
+    return 'სწორი პასუხი: '+q.check.expect.join(' და ')+'. გადახედე წინა მინიშნებებს და შეადარე, რომელ ნაბიჯზე შეიცვალა შენი მსჯელობა.';
+  }
+  if(q.check&&q.check.type==='reflect') return 'რეფლექსიაში მთავარია სამი რამ: დაასახელო კონკრეტული რთული ნაბიჯი, რა დაგეხმარა მის გადალახვაში და როგორ შეამოწმე შედეგი.';
+  return 'სწორი პასუხის იდეა ნაჩვენებია წინა მინიშნებებში. გადახედე ბოლო ნაბიჯს და დააკვირდი, სად შეიცვალა შენი მსჯელობა.';
+}
+function revealAndHold(note){
+  const q=curQ();
+  S.results[q.id]={score:0,help:S.level,tries:S.tries,verdict:'wrong',revealed:true,conf:S.curConf||0,first:S.firstVerdict||'wrong'};
+  if(note==='flag'&&!S.flags.includes(q.id)) S.flags.push(q.id);
+  S.mode='reveal';
+  S.curPrompt=correctAnswerText(q);
+  S.turns.push({who:'ai',text:'სწორი პასუხის ახსნა: '+S.curPrompt});
+  save(); render(false);
+}
+function nextAfterReveal(){
+  const box=document.getElementById('selfx'); const txt=(box&&box.value||'').trim();
+  if(txt.length<10){status(T('დაწერე მოკლე ახსნა საკუთარი სიტყვებით (ერთი-ორი წინადადება) — ასე ცოდნა შენი ხდება.'),'warn'); if(box) box.focus(); return;}
+  const q=curQ();
+  logTurn('selfexpl','თვითახსნა სწორი პასუხის ჩვენების შემდეგ',txt);
+  if(S.results[q.id]) S.results[q.id].selfExpl=true;
+  afterQuestion(q);
+}
+function finishQ(verdict,note,final){
+  const q=curQ();
+  let score=0;
+  if(final) score=verdict==='correct'?2:(verdict==='partial'?1:0);
+  else if(verdict==='correct') score=S.level===0?2:(S.level===1?1.5:1);
+  else if(verdict==='partial') score=1;
+  S.results[q.id]={score,help:S.level,tries:S.tries,verdict,conf:S.curConf||0,first:S.firstVerdict||verdict,noHelp:!!final};
+  if(note==='flag'&&!S.flags.includes(q.id)) S.flags.push(q.id);
+  afterQuestion(q);
+}
+function afterQuestion(q){
+  if(!indep()&&q.after&&THEORY_CARDS[q.after]){
+    if(!S.notes.includes(q.after)) S.notes.push(q.after);
+    S.mode='theory'; S.theoryId=q.after; S.turns=[]; save(); render(false); return;
+  }
+  advance();
+}
+function advance(){
+  S.qi++; S.level=0; S.tries=0; S.mode='main'; S.curPrompt=null; S.turns=[]; S.hadPartial=false; S.curConf=0; S.firstVerdict=''; S.theoryId=null;
+  if(S.qi>=Q.length){ S.done=true; archiveSession(); }
+  save(); render(true);
+}
+async function onGo(){
+  if(busy) return;
+  const box=document.getElementById('answer'); const ans=(box.value||'').trim();
+  if(!ans){status(T('ჯერ დაწერე პასუხი. თუ ვერ ხვდები, დააჭირე „{b}“.',{b:curQ().stage==='F'||indep()?T('არ ვიცი'):T('გავიჭედე')}),'warn');box.focus();return}
+  const q=curQ();
+  const first=S.mode==='main'&&S.tries===0&&S.level===0&&!S.hadPartial;
+  if(first){
+    const c=document.querySelector('input[name=conf]:checked');
+    if(!c){status(T('მონიშნე, რამდენად ხარ დარწმუნებული შენს პასუხში — ესეც შენი ცოდნის ნაწილია.'),'warn');const f=document.querySelector('input[name=conf]');if(f)f.focus();return}
+    S.curConf=Number(c.value);
+  }
+  S.turns.push({who:'stu',text:ans});
+  if(S.mode!=='main'){ // answered a simpler / control question -> back to the main question
+    logTurn(S.mode==='simpler'?'simpler':'control',S.curPrompt,ans);
+    S.mode='main'; S.curPrompt=null; save(); render(true);
+    status(T('კარგი. ახლა კვლავ სცადე მთავარი კითხვა.'));
     return;
   }
-  r.score = 0; r.status = 'not solved'; r.revealed = true; r.finalAnswer = ans; save(); revealView();
+  setBusy(true); status(q.stage==='F'||indep()?T('ვიწერ პასუხს…'):T('ვამოწმებ პასუხს…'));
+  const r=await judge(q,ans);
+  setBusy(false);
+  logTurn('main',q.text,ans,{verdict:r.verdict,err:r.err||r.errLabel||'',conf:first?S.curConf:''});
+  if(r.err) S.errors.push({q:q.id,err:r.err});
+  else if(r.errLabel&&r.verdict!=='correct') S.errors.push({q:q.id,label:r.errLabel});
+  if(first) S.firstVerdict=r.verdict;
+  if(q.stage==='F'||indep()){ status(''); return finishQ(r.verdict,null,true); }
+  if(r.verdict==='correct'){ status(''); return finishQ('correct'); }
+  if(r.verdict==='partial'&&S.hadPartial){ status(''); return finishQ('partial'); }
+  S.tries++;
+  if(r.verdict==='partial'){
+    S.hadPartial=true; S.mode='control';
+    S.curPrompt=r.follow||'შენი პასუხი ნაწილობრივ სწორია. რა აკლია? დააზუსტე ან შეამოწმე კონკრეტულ მაგალითზე.';
+    S.turns.push({who:'ai',text:S.curPrompt});
+    save(); render(true); status(T('ნაწილობრივ სწორია — დააზუსტე.'));
+    return;
+  }
+  if(S.tries>=2){ // two unsuccessful attempts: raise help; after the final help, show the answer before moving on
+    if(S.level>=3||q.check.type==='reflect'){ return revealAndHold(S.level>=3?'flag':null); }
+    return raiseHelp('auto');
+  }
+  S.mode='control';
+  S.curPrompt=r.follow||q.check.follow||GENERIC_FOLLOW[q.check.type]||GENERIC_FOLLOW.ai;
+  S.turns.push({who:'ai',text:S.curPrompt});
+  save(); render(true); status('');
+}
+async function onStuck(){
+  if(busy) return;
+  const q=curQ();
+  const ans=(document.getElementById('answer').value||'').trim();
+  if(q.stage==='F'||indep()){
+    logTurn('dontknow',q.text,ans,{verdict:'wrong'});
+    if(!S.firstVerdict) S.firstVerdict='stuck';
+    status(''); return finishQ('wrong',null,true);
+  }
+  logTurn(S.mode==='main'?'stuck':'stuck-'+S.mode,S.mode==='main'?q.text:S.curPrompt,ans,{verdict:'stuck'});
+  if(!S.firstVerdict) S.firstVerdict='stuck';
+  S.turns.push({who:'stu',text:'გავიჭედე'+(ans?' ('+ans+')':'')});
+  if(S.level>=3){ status(''); return revealAndHold('flag'); }
+  await raiseHelp('stuck');
+}
+async function raiseHelp(why){
+  const q=curQ();
+  S.level++;
+  let txt=null;
+  if(sample){
+    setBusy(true); status(T('ვამზადებ უფრო მარტივ კითხვას…'));
+    try{ txt=await aiSimpler(q,S.level,historyText()); }catch(e){aiFail(e)}
+    setBusy(false);
+  }
+  S.curPrompt=txt||q.ladder[S.level-1];
+  S.mode='simpler';
+  S.turns.push({who:'ai',text:S.curPrompt});
+  save(); render(true);
+  status(why==='auto'?T('ვცადოთ უფრო პატარა ნაბიჯი.'):'');
+}
+function status(msg,cls){const el=document.getElementById('status');if(el){el.textContent=msg;el.className='status'+(cls?' '+cls:'')}}
+function setBusy(b){busy=b;document.querySelectorAll('#go,#stuck').forEach(x=>{x.disabled=b;x.setAttribute('aria-busy',String(b))})}
+function leaveForAnotherTopic(){
+  save();
+  S.started=false;
+  render();
+  status(T('მიმდინარე დიალოგი შენახულია. შეგიძლია აირჩიო სხვა თემა ან მოგვიანებით გააგრძელო წინა თემა.'));
+}
+function draftOtherKey(){
+  const k=startDraft.otherKey||'ap';
+  return k==='free'?offlineTopicKey(startDraft.free||''):k;
+}
+let theoryChanged=false;
+function openTheory(key){
+  const cur=offlineTopicKey(S.topic);
+  const ok=k=>k&&(SCEN[k]||OTHER_TOPICS[k]);
+  theoryKey=(typeof key==='string'&&ok(key))?key:(S.started&&ok(cur)?cur:(SCEN[selTopic]?selTopic:(ok(draftOtherKey())?draftOtherKey():'derivative')));
+  theoryChanged=false; view='theory';render();window.scrollTo(0,0)
 }
 
-function requestHint() {
-  const r = session.results[session.qi];
-  if (r.hints >= 3) { revealView(); return; }
-  captureDraft();
-  r.hints++; session.hints++; save();
-  focusNext = 'hint'; render();
+/* ============ rendering: progress rail and the question card ============ */
+function visibleStages(){return STAGES.filter(s=>s.id==='R'||Q.some(q=>q.stage===s.id));}
+function rail(){
+  const vs=visibleStages(), el=document.getElementById('rail');
+  el.style.setProperty('--n',vs.length);
+  el.setAttribute('aria-label',T('პროგრესი'));
+  const idx=S.done?vs.length-1:(S.started&&curQ()?vs.findIndex(s=>s.id===curQ().stage):-1);
+  el.innerHTML=vs.map((s,i)=>{
+    let pct=0;
+    if(s.id==='R') pct=S.done?100:0;
+    else{const qs=Q.filter(q=>q.stage===s.id);pct=Math.round(qs.filter(q=>S.results[q.id]).length/qs.length*100)}
+    return `<div class="${i===idx?'cur':''}${pct===100?' full':''}" ${i===idx?'aria-current="step"':''}><div class="bar" role="progressbar" aria-label="${esc(T(s.short))}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><i data-w="${pct}"></i></div><div class="lbl">${T(s.short)}</div></div>`;
+  }).join('');
+  el.querySelectorAll('i[data-w]').forEach(i=>{i.style.width=i.dataset.w+'%'});
 }
-
-function skip() { const r = session.results[session.qi]; r.firstVerdict ||= 'unknown'; r.score = 0; r.status = 'unknown'; r.finalAnswer = ''; advance(); }
-
-function revealView() {
-  const q = current(), r = session.results[session.qi];
-  $('#app').innerHTML = `<section class="card">
-    <h2>Guided explanation</h2>
-    <p class="small">${escapeHTML(META[session.topic].title)} · Question ${session.qi + 1} of ${session.questions.length}</p>
-    <p class="question">${escapeHTML(q.text)}</p>
-    <p>The answer has not been independently established.</p>
-    <div class="note">${escapeHTML(q.solution)}</div>
-    <p class="small">For the research log, this remains an assisted/unsolved response, not an independent success.</p>
-    <div class="buttons"><button type="button" class="btn primary" id="continue">Continue</button></div>
-  </section>`;
-  $('#continue').onclick = () => { r.status = 'revealed'; r.revealed = true; r.score = 0; advance(); };
-  focusNext = 'heading'; applyFocus();
+function cardHTML(id){return TX(THEORY_CARDS[id].html)}
+function notesPanel(open){
+  if(!S.notes||!S.notes.length) return '';
+  return `<details class="notes"${open?' open':''}><summary>${T('ჩემი კონსპექტი · {n} თეორიული დასკვნა',{n:S.notes.length})}</summary>${S.notes.map(id=>`<div class="tcard">${cardHTML(id)}</div>`).join('')}</details>`;
 }
-
-function advance() {
-  session.qi++; draft = EMPTY_DRAFT; save();
-  if (session.qi >= session.questions.length) { finish(); return; }
-  focusNext = 'question'; render();
+function threadHTML(){
+  return S.turns.length?`<details class="thread"><summary>${T('ამ კითხვის დიალოგი ({n})',{n:S.turns.length})}</summary><ol>${S.turns.map(x=>`<li class="${x.who==='stu'?'stu':''}"><span class="who">${x.who==='stu'?T('მოსწავლე'):T('სოკრატე')}</span>${M(TX(x.text))}</li>`).join('')}</ol></details>`:'';
 }
-
-function finish() {
-  session.finished = true; session.ended = new Date().toISOString(); save();
-  const arc = getArchive(); arc.push(session);
-  const stored = putArchive(arc);
-  focusNext = 'heading'; render();
-  if (!stored) openDialog({title: 'Storage is full', message: 'Local storage is full. Export your session now.'});
-}
-
-/* ------------------------------------------------------------------ student: report */
-
-// Unchanged from EN-DEMO-4.2.
-function summarize(s){const r=s.results,graded=r.filter(x=>x&&x.score!=null);const possible=graded.length*2;return{total:r.length,graded:graded.length,review:r.filter(x=>x&&x.score==null).length,score:possible?Math.round(100*graded.reduce((a,x)=>a+x.score,0)/possible):null,first:r.filter(x=>x&&x.firstVerdict==='correct').length,hints:r.reduce((a,x)=>a+(x?.hints||0),0),highConfidenceWrong:r.filter(x=>x&&x.confidence>=4&&x.firstVerdict==='wrong').length}}
-
-function verdictBadge(v) { return v ? `<span class="verdict v-${escapeHTML(v)}">${escapeHTML(v)}</span>` : '—'; }
-
-function reportView(app) {
-  const A = summarize(session);
-  app.innerHTML = `<section class="card">
-    <h2>Session report</h2>
-    <p class="small">${escapeHTML(META[session.topic].title)} · ${escapeHTML(session.mode)} · ${escapeHTML(session.study.code || 'anonymous')}</p>
-    <div class="stats">
-      <div class="stat"><b>${A.score === null ? '—' : A.score + '%'}</b>Automatic score*</div>
-      <div class="stat"><b>${A.first}</b>Correct first responses</div>
-      <div class="stat"><b>${A.hints}</b>Socratic prompts</div>
-      <div class="stat"><b>${A.review}</b>Answers needing review</div>
-    </div>
-    <div class="note caution"><b>Interpretation:</b> *Automatic score covers only automatically graded items (${A.graded}/${A.total}). Open-ended responses need human review and are excluded from this percentage. These figures alone do not validate a teaching method.</div>
-    <h3>Question-level evidence</h3>
-    <div class="scroll" role="region" aria-label="Question-level evidence" tabindex="0"><table>
-      <thead><tr><th scope="col">Stage / Question</th><th scope="col">First attempt</th><th scope="col">Help</th><th scope="col">Confidence</th><th scope="col">Score</th></tr></thead>
-      <tbody>${session.results.map((r, i) => {
-        const q = BANK[session.topic].find(x => x.id === session.questions[i]);
-        return `<tr><td>${escapeHTML(q.stage + ' / ' + q.id)}</td><td>${verdictBadge(r.firstVerdict)}</td><td>${r.hints}</td><td>${r.confidence || '—'}</td><td>${r.score == null ? 'Review' : r.score + '/2'}</td></tr>`;
-      }).join('')}</tbody>
-    </table></div>
-    <div class="buttons"><button type="button" class="btn primary" id="export">Export this session (CSV)</button><button type="button" class="btn soft" id="home">Choose another topic</button><button type="button" class="btn soft" id="review">Lecturer notes</button></div>
-    <p id="reportMsg" class="message" role="status" aria-live="polite"></p>
-    <p class="small">Saved only in this browser. Export after every pilot to avoid data loss.</p>
-  </section>`;
-  $('#export').onclick = () => {
-    const name = 'Socrates_' + session.topic + '_responses.csv';
-    download(name, csv(rowsForSession(session)), 'text/csv;charset=utf-8');
-    say('#reportMsg', 'Exported ' + name + '.', 'success');
-  };
-  $('#home').onclick = () => { session = null; forget(KEY); focusNext = 'heading'; render(); };
-  $('#review').onclick = () => goto('teacher');
-}
-
-// Unchanged from EN-DEMO-4.2: these keys are the CSV columns.
-function rowsForSession(s){return s.results.map((r,i)=>{const q=BANK[s.topic].find(q=>q.id===s.questions[i]);return{version:s.version,topic:s.topic,student_code:s.study.code,group:s.study.group,teaching_method:s.study.method,timepoint:s.study.timepoint,mode:s.mode,session_start:s.started,question_id:q.id,stage:q.stage,component:q.comp,question:q.text,first_attempt:r.attempts[0]?.answer||'',first_verdict:r.firstVerdict||'',final_answer:r.finalAnswer||r.attempts.at(-1)?.answer||'',verdict:r.status||'',confidence_1_to_5:r.confidence||'',hints:r.hints,attempt_count:r.attempts.length,score_0_to_2:r.score==null?'NEEDS_REVIEW':r.score,teacher_expected:q.solution}})}
-
-/* ------------------------------------------------------------------ researcher */
-
-function researchView(app) {
-  const all = getArchive();
-  const rows = all.flatMap(rowsForSession), grouped = {};
-  for (const s of all) { const key = [s.topic, s.study.group || 'Unassigned', s.study.method, s.study.timepoint, s.mode].join(' / '); (grouped[key] = grouped[key] || []).push(s); }
-  app.innerHTML = `<section class="card">
-    <h2>Researcher workspace</h2>
-    <p>Locally archived sessions: <b>${all.length}</b></p>
-    <div class="note caution">No server storage, consent system, participant authentication or multi-device synchronisation is included. The aggregated comparison below is descriptive only. Before field research, validate items and agree on a research protocol.</div>
-    <h3>Descriptive grouping</h3>
-    <div class="scroll" role="region" aria-label="Descriptive grouping" tabindex="0"><table>
-      <thead><tr><th scope="col">Topic / Group / Method / Stage / Mode</th><th scope="col">N</th><th scope="col">First responses correct</th><th scope="col">Mean automatically graded score</th></tr></thead>
-      <tbody>${Object.entries(grouped).map(([k, ss]) => {
-        const sm = ss.map(summarize), scores = sm.map(s => s.score).filter(v => v != null);
-        return `<tr><td>${escapeHTML(k)}</td><td>${ss.length}</td><td>${sm.reduce((a, x) => a + x.first, 0)}</td><td>${scores.length ? (scores.reduce((a, x) => a + x, 0) / scores.length).toFixed(1) + '%' : '—'}</td></tr>`;
-      }).join('') || '<tr><td colspan="4">No completed sessions yet.</td></tr>'}</tbody>
-    </table></div>
-    <div class="buttons"><button type="button" class="btn primary" id="exportAll">Export research data (CSV)</button><button type="button" class="btn danger-soft" id="deleteAll">Clear archived sessions</button></div>
-    <p id="researchMsg" class="message" role="status" aria-live="polite"></p>
-  </section>`;
-  $('#exportAll').onclick = () => {
-    if (!rows.length) { say('#researchMsg', 'No data yet. Complete at least one session first.', 'warn'); return; }
-    download('Kapanadze_AI_Socrates_EN_Research.csv', csv(rows), 'text/csv;charset=utf-8');
-    say('#researchMsg', `Exported ${rows.length} rows from ${all.length} session${all.length === 1 ? '' : 's'}.`, 'success');
-  };
-  $('#deleteAll').onclick = async () => {
-    if (!all.length) { say('#researchMsg', 'There are no archived sessions to clear.', 'warn'); return; }
-    const yes = await openDialog({
-      title: 'Clear archived sessions?',
-      message: `Permanently remove ${all.length} locally archived session${all.length === 1 ? '' : 's'} from this browser? This cannot be undone — export the research data first if you need it.`,
-      okLabel: 'Remove sessions', cancelLabel: 'Cancel', danger: true
-    });
-    if (!yes) return;
-    forget(ARCH);
-    focusNext = 'heading'; render();
-    say('#researchMsg', 'Archived sessions cleared.', 'success', true);
-  };
-}
-
-/* ------------------------------------------------------------------ lecturer */
-
-const THEORY = {
-  half: `<p><strong>Construction.</strong> On a suitable monomial domain (x &gt; 0), introduce H = D^(1/2) with H∘H = D where composition is well-defined. Assume H(x^β) = c(β)x^(β−1/2).</p><div class="eq">c(β)c(β−1/2) = β</div><p>For nonnegative integer n, c(n) = c₀(2n)!!/(2n−1)!!. On the half-integer chain, c(n−1/2) = (2n−1)!!/[2c₀(2n−2)!!]. Choosing c₀ = 1/√π matches Riemann–Liouville normalisation; the recurrence alone does not uniquely choose it.</p><div class="eq">D^(1/2)x = 2√x/√π ··· D^(1/2)x³ = 16x^(5/2)/(5√π)</div><p><b>Important qualification:</b> Composition and boundary terms depend on the function class. Do not assert that arbitrary fractional operators satisfy a semigroup law on every function.</p>`,
-  derivative: `<p><strong>Algebraic–geometric polynomial construction.</strong> For a polynomial P and point A=(a,P(a)), seek a nonvertical line y=P(a)+k(x−a) for which x=a is a double root of the difference.</p><div class="eq">P(x) − [P(a)+k(x−a)] = (x−a)²Q(x)</div><p>From the factor theorem, P(x)−P(a)=(x−a)R(x); therefore k=R(a) is unique. The map a ↦ k(a) constructs the derivative function.</p><div class="eq">x² → k(a)=2a ··· x³ → k(a)=3a²</div><p><b>Teaching principle:</b> move from intersections, to repeated roots, to tangency, and then to the derivative function. For cubic functions, a tangent can intersect the curve again elsewhere; “exactly one intersection” is not a general definition.</p>`,
-  ap: `<p>Start with patterns of equal differences. Represent the first, second and n-th terms using the first term a₁ and common difference d.</p><div class="eq">aₙ = a₁ + (n−1)d</div><p>The key conceptual obstacle is confusing the <em>number of terms</em> with the <em>number of transitions</em>. Use n=1 and n=2 as simple checks. Connect the sequence points (n,aₙ) with a straight line of slope d.</p><p>Assess concept recognition, algorithmic use, explanation, counterexamples, and independent verification separately.</p>`,
-  pyramids: `<p>Historical reasoning is based on claims and evidence, not on treating films or myths as proof. Egyptian royal pyramids served funerary roles; similar forms in other cultures can serve different purposes.</p><p>Relevant sources include archaeological evidence from the Giza workers' settlements, workers' tombs, inscriptions, the Diary of Merer (Wadi al-Jarf), and depictions of transport by sledges. Exact construction logistics and ramp arrangements remain areas of debate.</p><p>Teach chronological estimation, careful inference, source evaluation, and awareness of uncertainty. Historical dates and block counts are approximations.</p>`
-};
-
-function teacherView(app) {
-  app.innerHTML = `<section class="card">
-    <h2>Lecturer workspace</h2>
-    <p class="small">Transparent access for demonstration only — this is not protected by authentication.</p>
-    <div class="field-inline"><label for="teacherTopic">Topic</label><select id="teacherTopic">${Object.entries(META).map(([k, v]) => `<option value="${k}" ${k === subject ? 'selected' : ''}>${escapeHTML(v.title)}</option>`).join('')}</select></div>
-    <div id="theory" class="theory">${THEORY[subject]}</div>
-    <div class="row spread section-head"><h3>Question bank and rubric</h3><button type="button" class="btn soft sm no-print" id="toggleAll">Expand all</button></div>
-    <div id="items">${BANK[subject].map((q, i) => `<details>
-      <summary><span class="q-num">${i + 1}.</span> <span class="tag">${q.stage}/${q.comp}</span> ${escapeHTML(q.text)}</summary>
-      <div class="details-body">
-        <p><b>Expected answer / explanation:</b> ${escapeHTML(q.solution)}</p>
-        <p><b>Scoring:</b> ${q.kind === 'num' || q.kind === 'range' ? 'Numeric response can be checked automatically; check the reasoning independently.' : 'Open-ended answer may require lecturer review; do not interpret it as an automatically verified result.'}</p>
-        <p><b>Socratic prompts:</b></p>
-        <ol class="prompts">${[1, 2, 3].map(n => `<li>${escapeHTML(hint(subject, q, n))}</li>`).join('')}</ol>
+function render(focus){
+  rail();
+  const app=document.getElementById('app');
+  if(view==='theory') return renderTheory(app);
+  if(view==='research') return renderResearch(app);
+  if(!S.started) return renderStart(app);
+  if(S.done) return renderReport(app);
+  const q=curQ(); const st=STAGES.find(s=>s.id===q.stage);
+  const same=Q.filter(x=>x.stage===q.stage); const n=same.indexOf(q)+1, of=same.length;
+  if(S.mode==='theory'&&THEORY_CARDS[S.theoryId]){
+    app.innerHTML=`
+    <section class="card" aria-live="polite">
+      <div class="meta"><span class="tag">${T(st.name)}</span><span class="tag k">${T('ცოდნის ფიქსაცია · თეორიული დასკვნა')}</span></div>
+      <div class="tcard">${cardHTML(S.theoryId)}</div>
+      <p class="hint">${T('ეს დასკვნა აჯამებს იმას, რაც ახლა ააგე. ის შეინახება „ჩემს კონსპექტში“ — ნებისმიერ დროს შეგიძლია გადახედო.')}</p>
+      <div class="actions"><button class="btn go" id="tnext" type="button">${T('გავიგე — გაგრძელება')}</button></div>
+    </section>`;
+    const b=app.querySelector('#tnext'); b.onclick=advance; b.focus({preventScroll:true});
+    return;
+  }
+  if(S.mode==='reveal'){
+    app.innerHTML=`
+    <section class="card" aria-live="polite">
+      <div class="meta"><span class="tag">${T(st.name)} · ${n}/${of}</span><span class="tag k">${T(COMP[q.comp])}</span><span class="tag help">${T('სასწავლო უკუკავშირი · 0 ქულა')}</span></div>
+      <div class="parent"><span>${T('კითხვა, რომელიც ვერ შესრულდა')}</span>${M(TX(q.text))}</div>
+      <div class="intro"><b>${T('სწორი პასუხი და მოკლე ახსნა')}</b><br>${M(TX(S.curPrompt||correctAnswerText(q)))}</div>
+      <div class="selfx"><label for="selfx" class="f">${T('ახლა შენი ჯერია: ახსენი საკუთარი სიტყვებით, რომელი ნაბიჯი გამოგრჩა ან რატომ არის ეს პასუხი სწორი.')}</label>
+      <textarea id="selfx" placeholder="${esc(T('მაგ.: ვერ შევამჩნიე, რომ …'))}"></textarea></div>
+      <p class="hint">${T('ამ კითხვაზე ქულა არ გემატება, მაგრამ შენი თვითახსნა დასკვნაში აღინიშნება.')}</p>
+      <div class="actions">
+        <button class="btn go" id="nextReveal" type="button">${T('შემდეგი კითხვა')}</button>
+        <button class="btn ghost" id="changeTopicReveal" type="button">${T('შეწყვეტა / სხვა თემა')}</button>
       </div>
-    </details>`).join('')}</div>
-    <div class="buttons"><button type="button" id="print" class="btn soft">Print lecturer notes</button></div>
+      <div class="status" id="status" role="status" aria-live="polite"></div>
+      ${threadHTML()}
+    </section>`;
+    app.querySelector('#nextReveal').onclick=nextAfterReveal;
+    app.querySelector('#changeTopicReveal').onclick=leaveForAnotherTopic;
+    app.querySelector('#selfx').focus({preventScroll:true});
+    return;
+  }
+  const sub=S.mode!=='main', fin=q.stage==='F'||indep();
+  const firstTry=!sub&&S.tries===0&&S.level===0&&!S.hadPartial;
+  const sk=SCEN[offlineTopicKey(S.topic)];
+  const ot=OTHER_TOPICS[offlineTopicKey(S.topic)];
+  const syms=sk?sk.syms:(ot&&ot.syms?ot.syms:['aₙ','a₁','aₙ₊₁','d','n','−','·','(',')','=']);
+  app.innerHTML=`
+  <section class="card qcard" aria-live="polite">
+    <div class="meta">
+      <span class="tag">${T(st.name)} · ${n}/${of}</span>
+      <span class="tag k">${T(COMP[q.comp])}</span>
+      ${S.level>0?`<span class="tag help">${T('დახმარების დონე {n} · {name}',{n:S.level,name:T(HELPNAME[S.level])})}</span>`:''}
+      ${fin?`<span class="tag help">${q.stage==='F'?T('დახმარების გარეშე'):T('დიაგნოსტიკა · მინიშნებების გარეშე')}</span>`:''}
+      <span class="tag k count">${Q.indexOf(q)+1} / ${Q.length}</span>
+    </div>
+    ${q.intro&&firstTry?`<div class="intro">${supfmt(TX(q.intro))}</div>`:''}
+    ${sub?`<div class="parent"><span>${T('მთავარი კითხვა')}</span>${M(TX(q.text))}</div>
+      <span class="follow-label">${S.mode==='simpler'?T('უფრო მარტივი კითხვა'):T('შეამოწმე საკუთარი მსჯელობა')}</span>
+      <h2 class="q sub" id="qtext" tabindex="-1">${M(TX(S.curPrompt))}</h2>`
+     :`<h2 class="q" id="qtext" tabindex="-1">${M(TX(q.text))}</h2>`}
+    ${q.plot&&q.stage!=='F'?plotPanel(q.plot):''}
+    ${syms.length?`<div class="sym" role="toolbar" aria-label="${esc(T('სიმბოლოები'))}">
+      ${syms.map(s=>`<button type="button" data-ins="${s}" aria-label="${esc(T('ჩასვი: {s}',{s}))}">${s}</button>`).join('')}
+    </div>`:''}
+    <label for="answer" class="f">${T('შენი პასუხი')}</label>
+    <textarea id="answer" placeholder="${esc(T('დაწერე პასუხი ან შენი მსჯელობა…'))}" aria-describedby="kbdhint"></textarea>
+    ${firstTry?`<fieldset class="conf"><legend>${T('რამდენად ხარ დარწმუნებული შენს პასუხში? (პასუხის გაგზავნამდე)')}</legend>
+      <div class="conf5">${CONF5.map(([v,t])=>`<label><input type="radio" name="conf" value="${v}"><b>${v}</b><span>${T(t)}</span></label>`).join('')}</div></fieldset>`:(S.curConf?`<p class="hint">${T('პირველი პასუხის თავდაჯერება: {n}/5',{n:S.curConf})}</p>`:'')}
+    <div class="actions">
+      <button class="btn go" id="go" type="button">${fin?T('პასუხის ჩაწერა'):T('გადადი')}</button>
+      <button class="btn stuck" id="stuck" type="button">${fin?T('არ ვიცი'):T('გავიჭედე')}</button>
+      <button class="btn ghost" id="changeTopic" type="button">${T('შეწყვეტა / სხვა თემა')}</button>
+      <span class="hint kbd" id="kbdhint">${T('Ctrl + Enter — გადასვლა')}</span>
+    </div>
+    <div class="status" id="status" role="status" aria-live="polite"></div>
+    ${threadHTML()}
+    ${notesPanel(false)}
   </section>`;
-  $('#teacherTopic').onchange = e => { subject = e.target.value; focusNext = '#teacherTopic'; render(); };
-  $('#toggleAll').onclick = e => {
-    const items = [...app.querySelectorAll('#items details')], open = !items.every(d => d.open);
-    items.forEach(d => { d.open = open; });
-    e.currentTarget.textContent = open ? 'Collapse all' : 'Expand all';
-  };
-  $('#print').onclick = () => window.print();
+  if(q.plot&&q.stage!=='F') mountPlot(app,q.plot);
+  const box=app.querySelector('#answer');
+  app.querySelector('#go').onclick=onGo;
+  app.querySelector('#stuck').onclick=onStuck;
+  app.querySelector('#changeTopic').onclick=leaveForAnotherTopic;
+  box.addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();onGo()}});
+  app.querySelectorAll('[data-ins]').forEach(b=>b.onclick=()=>{
+    const s=b.dataset.ins, a=box.selectionStart, z=box.selectionEnd;
+    box.value=box.value.slice(0,a)+s+box.value.slice(z); box.focus(); box.selectionStart=box.selectionEnd=a+s.length;
+  });
+  if(focus) box.focus({preventScroll:true});
 }
 
-// Print every rubric item, not just the expanded ones (also covers Ctrl/⌘ + P).
-window.addEventListener('beforeprint', () => document.querySelectorAll('details:not([open])').forEach(d => { d.open = true; d.dataset.printOpened = '1'; }));
-window.addEventListener('afterprint', () => document.querySelectorAll('details[data-print-opened]').forEach(d => { d.open = false; delete d.dataset.printOpened; }));
-
-/* ------------------------------------------------------------------ tangent explorer */
-
-function slopeText() { return 'a = ' + graphA.toFixed(1) + '; k = ' + (2 * graphA).toFixed(1); }
-
-function derivativeGraph() {
-  return `<div class="chart">
-    <div class="row spread"><b>Explore the parabola and its tangent</b><span id="slab" class="mono">${slopeText()}</span></div>
-    <div id="graph">${graphSVG(graphA)}</div>
-    <label for="slope">Choose the contact point a</label>
-    <input type="range" id="slope" min="-2" max="2" step="0.1" value="${graphA}" aria-valuetext="${slopeText()}">
-    <p class="small">The slope k=2a follows from the double-root criterion for P(x)=x².</p>
-  </div>`;
+/* ============ header: language, theme, static text ============ */
+const THEME_KEY='kapanadze-sokrate-theme';
+function applyTheme(mode){
+  const root=document.documentElement;
+  if(mode==='light'||mode==='dark') root.setAttribute('data-theme',mode); else root.removeAttribute('data-theme');
+  const b=document.getElementById('themeBtn');
+  if(b){
+    const label={auto:T('თემა: ავტომატური'),light:T('თემა: ნათელი'),dark:T('თემა: მუქი')}[mode]||T('თემა: ავტომატური');
+    b.setAttribute('aria-label',label); b.title=label; b.dataset.mode=mode;
+  }
+}
+function headerText(){
+  const set=(id,txt)=>{const el=document.getElementById(id); if(el) el.textContent=txt;};
+  set('brandName',T('კაპანაძე AI–სოკრატე'));
+  set('brandSub',T('დავით კაპანაძის მეთოდოლოგია · დიაგნოსტიკური სოკრატული დიალოგი'));
+  set('skipLink',T('მთავარ შინაარსზე გადასვლა'));
+  set('footerText',T('© დავით კაპანაძე · კაპანაძე AI–სოკრატე · თემაზე დაფუძნებული დიაგნოსტიკური მოდელი'));
+  document.title=T('კაპანაძე AI–სოკრატე · დიაგნოსტიკური სოკრატული დიალოგი');
+  const meta=document.querySelector('meta[name="description"]'); if(meta) meta.content=T('კაპანაძე AI–სოკრატე: სოკრატული დიაგნოსტიკური დიალოგი მათემატიკასა და ისტორიაში — წინარე ცოდნა, სამი დონე, ცოდნის სამი კომპონენტი და დასკვნა ლექტორისთვის.');
+  const g=document.getElementById('langSwitch'); if(g) g.setAttribute('aria-label',T('ენა'));
+  document.querySelectorAll('[data-lang]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.lang===I18N.lang)));
+  chip();
+}
+// Keeps what the user has typed when the screen is redrawn in another language.
+function captureInputs(){
+  const app=document.getElementById('app'), snap={};
+  app.querySelectorAll('textarea[id],input[type=text][id],select[id]').forEach(el=>{snap[el.id]=el.value});
+  const c=app.querySelector('input[name=conf]:checked'); if(c) snap.__conf=c.value;
+  if(app.querySelector('#begin')){
+    const v=id=>app.querySelector('#'+id);
+    if(v('name')) startDraft.name=v('name').value; if(v('grade')) startDraft.grade=v('grade').value;
+    if(v('smode')) startDraft.smode=v('smode').value; if(v('scope')) startDraft.scope=v('scope').value;
+    if(v('scode')) startDraft.code=v('scode').value; if(v('sgroup')) startDraft.group=v('sgroup').value;
+    if(v('smethod')) startDraft.method=v('smethod').value; if(v('stime')) startDraft.timepoint=v('stime').value;
+    if(v('otherTopic')) startDraft.otherKey=v('otherTopic').value; if(v('topic')) startDraft.free=v('topic').value;
+  }
+  return snap;
+}
+function restoreInputs(snap){
+  const app=document.getElementById('app');
+  Object.entries(snap).forEach(([id,val])=>{ if(id==='__conf') return; const el=app.querySelector('#'+CSS.escape(id)); if(el&&el.tagName!=='SELECT') el.value=val; });
+  if(snap.__conf){ const r=app.querySelector(`input[name=conf][value="${snap.__conf}"]`); if(r) r.checked=true; }
+}
+function onLanguageChanged(){
+  const snap=captureInputs();
+  const y=window.scrollY;
+  if(S.started&&!S.done){ S.langs=S.langs||[]; if(!S.langs.includes(I18N.lang)) S.langs.push(I18N.lang); save(); }
+  headerText();
+  applyTheme(document.getElementById('themeBtn')?.dataset.mode||'auto');
+  render(false);
+  restoreInputs(snap);
+  window.scrollTo(0,y);
+}
+function initHeader(){
+  document.querySelectorAll('[data-lang]').forEach(b=>b.addEventListener('click',()=>I18N.setLang(b.dataset.lang)));
+  I18N.onChange(onLanguageChanged);
+  let mode='auto'; try{mode=localStorage.getItem(THEME_KEY)||'auto'}catch(e){}
+  applyTheme(mode);
+  const tb=document.getElementById('themeBtn');
+  if(tb) tb.addEventListener('click',()=>{const next={auto:'light',light:'dark',dark:'auto'}[tb.dataset.mode||'auto']; try{localStorage.setItem(THEME_KEY,next)}catch(e){} applyTheme(next);});
 }
 
-function graphSVG(a) {
-  const W = 530, H = 280, cx = x => 265 + x * 70, cy = y => 245 - y * 26;
-  let d = '';
-  for (let i = 0; i <= 150; i++) { const x = -3.3 + i * 6.6 / 150, y = x * x; d += (i ? 'L' : 'M') + cx(x).toFixed(1) + ',' + cy(y).toFixed(1); }
-  const x1 = -3.5, x2 = 3.5, s = 2 * a, b = -a * a;
-  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Parabola y = x² with its tangent line at x = ${a.toFixed(1)}, slope ${(2 * a).toFixed(1)}">
-    <line class="g-axis" x1="20" y1="245" x2="510" y2="245"/><line class="g-axis" x1="265" y1="20" x2="265" y2="265"/>
-    <path class="g-curve" fill="none" d="${d}"/>
-    <line class="g-tangent" x1="${cx(x1)}" y1="${cy(s * x1 + b)}" x2="${cx(x2)}" y2="${cy(s * x2 + b)}"/>
-    <circle class="g-point" cx="${cx(a)}" cy="${cy(a * a)}" r="5"/>
-    <text class="g-label" x="277" y="21">y</text><text class="g-label" x="510" y="238">x</text>
-  </svg>`;
-}
-
-render();
+/* ============ boot ============ */
+registerContent();
+registerUIContent();
+I18N.apply();
+initHeader();
+headerText();
+const saved=load();
+if(saved&&saved.started){ S=Object.assign(freshState(),{name:saved.name,topic:saved.topic||'',grade:saved.grade||'9–10',qids:saved.qids||null,smode:saved.smode||'guided',scope:saved.scope||'full'}); Q=applyScope(questionsFor(saved.topic,saved.questions),saved.qids); }
+else Q=questionsFor(SCEN[selTopic]?SCEN[selTopic].topic:'წარმოებული ზღვრის გარეშე');
+chip(); render();
+(async()=>{
+  try{
+    if(window.claude&&claude.use){
+      sample=await claude.use('sample');
+      downloads=await claude.use('downloads');
+    }
+  }catch(e){sample=null}
+  aiState=sample?'on':'off'; chip(); render();
+})();
+setTimeout(()=>{if(aiState==='checking'){aiState='off';chip();}},11000);
